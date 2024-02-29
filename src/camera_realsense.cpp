@@ -28,8 +28,10 @@
 #include "third_party/fpng.h"
 #include "third_party/lodepng.h"
 
+#ifndef htonll
 #define htonll(x) \
     ((1 == htonl(1)) ? (x) : ((uint64_t)htonl((x)&0xFFFFFFFF) << 32) | htonl((x) >> 32))
+#endif
 
 namespace {
 bool debug_enabled = false;
