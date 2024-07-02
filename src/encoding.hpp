@@ -328,6 +328,17 @@ std::vector<unsigned char> rsPointsToPCDBytes(const rs2::points& points, const r
         }
     }
 
+    // Post-process subsampling if the data size exceeds 4MB (gRPC message size limit)
+    // TODO RSDK-7976: Change string to new gRPC size limit or remove totally
+    if (dataBytes.size() > 4194304) {
+        std::vector<unsigned char> subsampledData;
+        int subsampleRatio = dataBytes.size() / 4194304 + 1;
+        for (size_t i = 0; i < dataBytes.size(); i += subsampleRatio * pointSize) {
+            subsampledData.insert(subsampledData.end(), dataBytes.begin() + i, dataBytes.begin() + i + pointSize);
+        }
+        dataBytes = std::move(subsampledData);
+    }
+
     size_t numPoints = dataBytes.size() / pointSize;
     header << "WIDTH " << numPoints << "\n";
     header << "HEIGHT 1\n";
