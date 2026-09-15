@@ -104,6 +104,9 @@ public:
 // SimpleStreamProfile: Wrapper that can convert to SimpleVideoStreamProfile
 class SimpleStreamProfile {
 public:
+  // All fake profiles are video profiles.
+  template <typename T> bool is() const { return true; }
+
   template <typename T> T as() const {
     return T{format_, width_, height_, fps_, stream_index_};
   }
@@ -1174,23 +1177,24 @@ TEST_F(DeviceTest, DisableAutoExposurePriority_ColorSensor_DisablesOption) {
       << "Should not log errors for successful operation";
 }
 
-TEST_F(DeviceTest, DisableAutoExposurePriority_DepthSensor_DoesNothing) {
+TEST_F(DeviceTest, DisableAutoExposurePriority_OptionUnsupported_DoesNothing) {
   test_utils::LogCaptureFixture log_capture;
   viam::sdk::LogSource logger;
 
   MockSensor mock_sensor;
-  mock_sensor.set_sensor_type(false, true); // Depth sensor
+  mock_sensor.set_sensor_type(false, true); // Stereo sensor (e.g. D405)
 
-  // Setup expectations - should not call set_option for depth sensor
-  EXPECT_CALL(mock_sensor, supports(_)).Times(0);
+  // Sensor does not expose the auto-exposure priority option
+  EXPECT_CALL(mock_sensor, supports(RS2_OPTION_AUTO_EXPOSURE_PRIORITY))
+      .WillOnce(Return(false));
   EXPECT_CALL(mock_sensor, set_option(_, _)).Times(0);
 
   // Execute
   disableAutoExposurePriority(mock_sensor, logger);
 
-  // Verify no logs (function returns early for non-color sensors)
+  // Verify no logs (function returns early if option not supported)
   auto all_logs = log_capture.get_records();
-  EXPECT_EQ(all_logs.size(), 0) << "Should not log for non-color sensors";
+  EXPECT_EQ(all_logs.size(), 0) << "Should not log when option not supported";
 }
 
 TEST_F(DeviceTest, DisableAutoExposurePriority_SetOptionFails_LogsWarning) {
@@ -1217,33 +1221,6 @@ TEST_F(DeviceTest, DisableAutoExposurePriority_SetOptionFails_LogsWarning) {
               ::testing::HasSubstr("Failed to disable Auto-Exposure Priority"));
   EXPECT_THAT(warning_logs[0].message,
               ::testing::HasSubstr("Option not supported"));
-}
-
-TEST_F(DeviceTest, DisableAutoExposurePriority_UnknownSensorType_LogsError) {
-  test_utils::LogCaptureFixture log_capture;
-  viam::sdk::LogSource logger;
-
-  MockSensor mock_sensor;
-  mock_sensor.set_sensor_type(
-      false, false); // Unknown sensor (neither color nor depth)
-
-  // Execute - should log error for unknown sensor type
-  disableAutoExposurePriority(mock_sensor, logger);
-
-  // Verify error log for unknown sensor
-  auto error_logs = log_capture.get_error_logs();
-  ASSERT_GE(error_logs.size(), 1) << "Should log error for unknown sensor type";
-
-  // Check that at least one error mentions the failure
-  bool found_error = false;
-  for (const auto &log : error_logs) {
-    if (log.message.find("Failed to get sensor type") != std::string::npos ||
-        log.message.find("Invalid sensor type") != std::string::npos) {
-      found_error = true;
-      break;
-    }
-  }
-  EXPECT_TRUE(found_error) << "Should log error for unknown sensor type";
 }
 
 TEST_F(DeviceTest,

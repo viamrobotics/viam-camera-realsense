@@ -754,13 +754,11 @@ public:
       time::throwIfTooOld(nowMs, depth_frame.get_timestamp(), MAX_FRAME_AGE_MS,
                           "no recent depth frame: check USB connection");
 
-      if (color_frame.get_data() == nullptr or
-          color_frame.get_data_size() == 0) {
-        throw std::runtime_error("[get_image] color data is null");
+      if (color_frame.get_data() == nullptr) {
+        throw std::runtime_error("[get_point_cloud] color data is null");
       }
 
-      if (depth_frame.get_data() == nullptr or
-          depth_frame.get_data_size() == 0) {
+      if (depth_frame.get_data() == nullptr) {
         throw std::runtime_error("[get_point_cloud] depth data is null");
       }
 
@@ -1740,6 +1738,10 @@ private:
 
     return native_config;
   }
+
+public:
+  // The DeviceFunctions the module runs with. Public so tests can drive the
+  // real device lifecycle against a software device.
   static DeviceFunctions createDefaultDeviceFunctions() {
     return DeviceFunctions{
         .stopDevice =

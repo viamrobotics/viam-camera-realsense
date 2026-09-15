@@ -458,12 +458,29 @@ cmake --build --preset conan-release
 ctest --test-dir build/Release --output-on-failure
 ```
 
+### Integration tests
+`test/integration_tests.cpp` drives the module end to end (device lifecycle,
+`rs2::pipeline`, alignment, point cloud, encoders) against a librealsense
+software device, so no camera is needed. They run as part of `ctest` above and
+carry the ctest label `integration`:
+
+```
+./bin/integration-tests.sh              # build, then ctest -L integration
+./bin/integration-tests.sh -R PointCloud  # extra args go to ctest
+ctest --test-dir build/Release -LE integration   # unit tests only
+```
+
+In CI they are a separate step of the Test workflow on both Linux legs;
+`workflow_dispatch` takes a `tests` input (`all`, `unit`, `integration`).
+
 ### Coverage
-Reuses the `conan install` from above; only the configure step changes.
+Reuses the `conan install` from above; only the configure step changes. The
+`coverage` target reports on whatever `ctest` ran before it.
 
 ```
 cmake --preset conan-release -DVIAM_REALSENSE_ENABLE_COVERAGE=ON
 cmake --build --preset conan-release
+ctest --test-dir build/Release --output-on-failure
 cmake --build --preset conan-release --target coverage
 ```
 

@@ -5,6 +5,12 @@ concurrency:
 
 on:
   workflow_dispatch:
+    inputs:
+      tests:
+        description: Which suites to run on the non-coverage legs
+        type: choice
+        default: all
+        options: [all, unit, integration]
   # PRs for pre-merge validation; main pushes update baseline coverage
   pull_request:
   push:
@@ -16,6 +22,10 @@ jobs:
     name: Run Tests
     timeout-minutes: 30
     runs-on: ${{ matrix.runner }}
+    env:
+      # Which suites to run: the workflow_dispatch "tests" input, or all of
+      # them on pull requests and pushes.
+      TESTS: ${{ inputs.tests || 'all' }}
     strategy:
       fail-fast: false
       matrix:
@@ -79,23 +89,31 @@ jobs:
             exit 1
           fi
 
-      - name: Build and run tests
-        if: matrix.coverage != true
-        run: |
-          cmake --preset conan-release
-          cmake --build --preset conan-release
-          ctest --test-dir build/Release --output-on-failure
-
+      # The coverage configure below needs lcov present (find_program REQUIRED).
       - name: Install lcov (coverage leg)
         if: matrix.coverage == true
         run: apt-get update && apt-get install -y lcov
 
-      - name: Build and run tests with coverage
-        if: matrix.coverage == true
+      - name: Build
         run: |
-          cmake --preset conan-release -DVIAM_REALSENSE_ENABLE_COVERAGE=ON
+          cmake --preset conan-release ${{ matrix.coverage && '-DVIAM_REALSENSE_ENABLE_COVERAGE=ON' || '' }}
           cmake --build --preset conan-release
-          cmake --build --preset conan-release --target coverage
+
+      - name: Run unit tests
+        if: env.TESTS == 'all' || env.TESTS == 'unit'
+        run: ctest --test-dir build/Release --output-on-failure -LE integration
+
+      # End to end against a librealsense software device (test/integration_tests.cpp).
+      # Linux only: the module ships for Linux, and macOS pays a 2 s
+      # librealsense teardown per case.
+      - name: Run integration tests
+        if: runner.os == 'Linux' && (env.TESTS == 'all' || env.TESTS == 'integration')
+        run: ./bin/integration-tests.sh
+
+      # Reports on the ctest runs above; the coverage target does not run tests.
+      - name: Coverage report
+        if: matrix.coverage == true
+        run: cmake --build --preset conan-release --target coverage
 
       - name: Upload coverage reports to Codecov
         if: matrix.coverage == true

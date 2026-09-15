@@ -19,11 +19,11 @@ if(VIAM_REALSENSE_ENABLE_COVERAGE)
         add_link_options(--coverage)
     endif()
 
-    # Runs ctest + lcov. Build the `all` target first; this target does not
-    # depend on the test binaries.
+    # Runs lcov over the .gcda files of a prior ctest run. It does not run the
+    # tests itself, so CI can run the suites as separate steps. Build the `all`
+    # target and run ctest first.
     find_program(LCOV_EXECUTABLE lcov REQUIRED)
     add_custom_target(coverage
-        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
         COMMAND ${LCOV_EXECUTABLE} --capture --directory . --output-file coverage.info
         COMMAND ${LCOV_EXECUTABLE} --remove coverage.info /usr/* */test/* */_deps/* */.conan2/* --output-file coverage.info
         COMMAND ${LCOV_EXECUTABLE} --list coverage.info

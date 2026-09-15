@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include <viam/sdk/log/logging.hpp>
@@ -142,40 +143,30 @@ void applyDepthSensorOptions(SensorT &sensor, ViamConfigT const &viamConfig,
   }
 }
 
+// Call this on the sensor that serves the color stream. On most D400
+// cameras that is the dedicated RGB sensor; on the D405 the stereo sensor
+// serves color itself, so callers gate on what the sensor serves rather
+// than on its extension type.
 template <typename SensorT>
 void disableAutoExposurePriority(SensorT &sensor,
                                  viam::sdk::LogSource &logger) {
-  try {
-    auto sensor_type = sensors::get_sensor_type(sensor, logger);
-    if (sensor_type == sensors::SensorType::unknown) {
-      throw std::runtime_error("Unknown sensor type");
+  // CRITICAL: Disable auto-exposure priority to maintain frame sync.
+  // When enabled, RGB sensor drops frames to adjust exposure, breaking
+  // temporal alignment with depth (causes 5-20ms timestamp drift).
+  // Tradeoff: slightly worse exposure in changing light conditions,
+  // but tight temporal sync (mostly <5ms) between color and depth.
+  if (sensor.supports(RS2_OPTION_AUTO_EXPOSURE_PRIORITY)) {
+    try {
+      // Disable auto-exposure priority to ensure constant FPS
+      sensor.set_option(RS2_OPTION_AUTO_EXPOSURE_PRIORITY, 0.0);
+      VIAM_DEVICE_LOG(logger, info)
+          << "[disableAutoExposurePriority] Disabled Auto-Exposure Priority "
+             "(constant FPS) for color sensor";
+    } catch (const std::exception &e) {
+      VIAM_DEVICE_LOG(logger, warn) << "[disableAutoExposurePriority] Failed "
+                                       "to disable Auto-Exposure Priority: "
+                                    << e.what();
     }
-    // Only disable auto-exposure priority for color sensors
-    if (sensor_type != sensors::SensorType::color) {
-      return;
-    }
-    // CRITICAL: Disable auto-exposure priority to maintain frame sync.
-    // When enabled, RGB sensor drops frames to adjust exposure, breaking
-    // temporal alignment with depth (causes 5-20ms timestamp drift).
-    // Tradeoff: slightly worse exposure in changing light conditions,
-    // but tight temporal sync (mostly <5ms) between color and depth.
-    if (sensor.supports(RS2_OPTION_AUTO_EXPOSURE_PRIORITY)) {
-      try {
-        // Disable auto-exposure priority to ensure constant FPS
-        sensor.set_option(RS2_OPTION_AUTO_EXPOSURE_PRIORITY, 0.0);
-        VIAM_DEVICE_LOG(logger, info)
-            << "[disableAutoExposurePriority] Disabled Auto-Exposure Priority "
-               "(constant FPS) for color sensor";
-      } catch (const std::exception &e) {
-        VIAM_DEVICE_LOG(logger, warn) << "[disableAutoExposurePriority] Failed "
-                                         "to disable Auto-Exposure Priority: "
-                                      << e.what();
-      }
-    }
-  } catch (const std::exception &e) {
-    VIAM_DEVICE_LOG(logger, error)
-        << "[disableAutoExposurePriority] Failed to get sensor type: "
-        << e.what();
   }
 }
 
@@ -439,45 +430,48 @@ createSingleSensorConfig(std::shared_ptr<DeviceT> dev,
   // Query all sensors for the device
   auto sensors = dev->query_sensors();
 
-  typename decltype(sensors)::value_type sensor;
+  // Select by stream format rather than by sensor extension type: on most
+  // D400 cameras color and depth come from dedicated sensors, but on the
+  // D405 the single stereo sensor serves both streams and does not cast to
+  // rs2::color_sensor.
   for (auto &s : sensors) {
-    if (s.template is<SensorT>()) {
-      sensor = s;
-      enableGlobalTimestamp(sensor, logger);
-      // depth-sensor-only single-stream path
-      if (s.template is<rs2::depth_sensor>()) {
-        applyDepthSensorOptions(sensor, viamConfig, logger);
+    auto profiles = s.get_stream_profiles();
+    bool sensor_serves_stream = false;
+    for (auto &cp : profiles) {
+      // Skip non-video profiles (e.g. motion streams on IMU-equipped
+      // models) — casting them to a video profile is invalid.
+      if (not cp.template is<VideoStreamProfileT>()) {
+        continue;
       }
-    }
-  }
+      auto csp = cp.template as<VideoStreamProfileT>();
+      if (csp.format() != SensorTypeTraits<SensorT>::format_type) {
+        continue;
+      }
+      if (not sensor_serves_stream) {
+        sensor_serves_stream = true;
+        enableGlobalTimestamp(s, logger);
+        // depth-sensor-only single-stream path
+        if (SensorTypeTraits<SensorT>::stream_type == RS2_STREAM_DEPTH) {
+          applyDepthSensorOptions(s, viamConfig, logger);
+        }
+        VIAM_DEVICE_LOG(logger, info)
+            << "[createSingleSensorConfig] Got sensor with " << profiles.size()
+            << " stream profiles, looking for matches";
+      }
 
-  VIAM_DEVICE_LOG(logger, info)
-      << "[createSingleSensorConfig] Got sensor, getting stream profiles";
-  // Get stream profiles
-  auto profiles = sensor.get_stream_profiles();
-
-  VIAM_DEVICE_LOG(logger, info)
-      << "[createSingleSensorConfig] Got " << profiles.size()
-      << " stream profiles, looking for matches";
-  // Find matching profiles
-  for (auto &cp : profiles) {
-    auto csp = cp.template as<VideoStreamProfileT>();
-    if (csp.format() != SensorTypeTraits<SensorT>::format_type) {
-      continue;
-    }
-
-    if ((not viamConfig.width) or
-        (viamConfig.width == csp.width()) and
-            (not viamConfig.height or (viamConfig.height == csp.height()))) {
-      VIAM_DEVICE_LOG(logger, info)
-          << "[createSingleSensorConfig] Found matching "
-             "stream profile, enabling";
-      cfg->enable_stream(SensorTypeTraits<SensorT>::stream_type,
-                         csp.stream_index(), csp.width(), csp.height(),
-                         csp.format(), csp.fps());
-      VIAM_DEVICE_LOG(logger, info)
-          << "[createSingleSensorConfig] enabled stream";
-      return cfg;
+      if ((not viamConfig.width) or
+          (viamConfig.width == csp.width()) and
+              (not viamConfig.height or (viamConfig.height == csp.height()))) {
+        VIAM_DEVICE_LOG(logger, info)
+            << "[createSingleSensorConfig] Found matching "
+               "stream profile, enabling";
+        cfg->enable_stream(SensorTypeTraits<SensorT>::stream_type,
+                           csp.stream_index(), csp.width(), csp.height(),
+                           csp.format(), csp.fps());
+        VIAM_DEVICE_LOG(logger, info)
+            << "[createSingleSensorConfig] enabled stream";
+        return cfg;
+      }
     }
   }
   return nullptr;
@@ -494,23 +488,42 @@ std::shared_ptr<ConfigT> createSwD2CAlignConfig(std::shared_ptr<DeviceT> dev,
   // Query all sensors for the device
   auto sensors = dev->query_sensors();
 
-  typename decltype(sensors)::value_type color_sensor;
-  typename decltype(sensors)::value_type depth_sensor;
+  // Collect color and depth profiles by stream format from every sensor
+  // rather than looking for a dedicated color sensor and a dedicated depth
+  // sensor: on the D405 the single stereo sensor serves both streams and
+  // does not cast to rs2::color_sensor.
+  using SensorVectorT = decltype(sensors);
+  using ProfileVectorT =
+      std::decay_t<decltype(std::declval<typename SensorVectorT::value_type>()
+                                .get_stream_profiles())>;
+  ProfileVectorT color_profiles;
+  ProfileVectorT depth_profiles;
   for (auto &s : sensors) {
     enableGlobalTimestamp(s, logger);
-    if (s.template is<ColorSensorT>()) {
-      color_sensor = s;
-      disableAutoExposurePriority(color_sensor, logger);
+    bool serves_color = false;
+    bool serves_depth = false;
+    for (auto &p : s.get_stream_profiles()) {
+      // Skip non-video profiles (e.g. motion streams on IMU-equipped
+      // models) — casting them to a video profile is invalid.
+      if (not p.template is<VideoStreamProfileT>()) {
+        continue;
+      }
+      auto vsp = p.template as<VideoStreamProfileT>();
+      if (vsp.format() == SensorTypeTraits<ColorSensorT>::format_type) {
+        color_profiles.push_back(p);
+        serves_color = true;
+      } else if (vsp.format() == SensorTypeTraits<DepthSensorT>::format_type) {
+        depth_profiles.push_back(p);
+        serves_depth = true;
+      }
     }
-    if (s.template is<DepthSensorT>()) {
-      depth_sensor = s;
-      applyDepthSensorOptions(depth_sensor, viamConfig, logger);
+    if (serves_color) {
+      disableAutoExposurePriority(s, logger);
+    }
+    if (serves_depth) {
+      applyDepthSensorOptions(s, viamConfig, logger);
     }
   }
-
-  // Get stream profiles
-  auto color_profiles = color_sensor.get_stream_profiles();
-  auto depth_profiles = depth_sensor.get_stream_profiles();
 
   // Find matching profiles
   for (auto &cp : color_profiles) {
